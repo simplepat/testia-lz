@@ -258,12 +258,12 @@ Resources:
   EC2SecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: SSH and HTTP
+      GroupDescription: HTTPS
       VpcId: !Ref VPC
       SecurityGroupIngress:
           - IpProtocol: tcp
-            FromPort: 80
-            ToPort: 80
+            FromPort: 443
+            ToPort: 443
             SourceSecurityGroupId: !Ref ALBSecurityGroup
 
   # ALB Security Group allowing Port 80 connections from anywhere
@@ -271,12 +271,12 @@ Resources:
   ALBSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: Allow HTTP connection to ALB
+      GroupDescription: Allow HTTPS connection to ALB
       VpcId: !Ref VPC
       SecurityGroupIngress:
           - IpProtocol: tcp
-            FromPort: 80
-            ToPort: 80
+            FromPort: 443
+            ToPort: 443
             CidrIp: 0.0.0.0/0
 
   # RDS DB Security Group allowing incoming connections from EC2 through port 5432
@@ -350,8 +350,10 @@ Resources:
       Tags:
         - Key: environment
           Value: !Ref EnvironmentValue
+          PropagateAtLaunch: true
         - Key: projectName
           Value: !Ref ProjectName
+          PropagateAtLaunch: true
 
   # EC2 Target Group for load balancing
   EC2TargetGroup:
@@ -364,8 +366,8 @@ Resources:
       Matcher:
         HttpCode: 200
       Name: EC2TargetGroup
-      Port: 80
-      Protocol: HTTP
+      Port: 443
+      Protocol: HTTPS
       TargetGroupAttributes:
         - Key: deregistration_delay.timeout_seconds
           Value: 20
@@ -407,19 +409,19 @@ Resources:
       DefaultActions:
         - Type: forward
           TargetGroupArn: !Ref EC2TargetGroup
-        - Type: redirect
-          RedirectConfig:
-            Host: '#{host}'
-            Path: '/#{path}'
-            Port: 443
-            Protocol: HTTPS
-            Query: '#{query}'
-            StatusCode: HTTP_301
+        # - Type: redirect
+          # RedirectConfig:
+            # Host: '#{host}'
+            # Path: '/#{path}'
+            # Port: 443
+            # Protocol: HTTPS
+            # Query: '#{query}'
+            # StatusCode: HTTP_301
       # Certificates:
       #   - Ref: SSLCertificateArn
       LoadBalancerArn: !Ref ApplicationLoadBalancer
-      Port: 80
-      Protocol: HTTP
+      Port: 443
+      Protocol: HTTPS
       
       
   ###################
@@ -466,7 +468,7 @@ Resources:
         Statement:
           - Effect: Allow
             Action: 's3:*'
-            Resource: !Ref S3Bucket
+            Resource: !Sub 'arn:aws:s3:::${S3Bucket}/*'
       Roles:
         - !Ref S3WritableRole
 
