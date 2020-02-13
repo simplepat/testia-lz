@@ -1,0 +1,519 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Stack for Testia Django Backend hosted on EC2 with RDS backend
+
+Parameters:
+  ProjectName:
+    Description: Name of the project
+    Type: String
+    Default: testia-lz
+  EnvironmentValue:
+    AllowedValues:
+      - dev
+      - qa
+    Default: dev
+    Description: Target environment to be deployed in
+    Type: String
+  EC2InstanceType:
+    Description: EC2 instance type
+    Type: String
+    Default: t2.micro
+  SSHKeyName:
+    Description: Name of the EC2 keypair to enable SSH access to the instance
+    Type: AWS::EC2::KeyPair::KeyName
+  MinSize:
+    Description: Min. number of EC2 instances in auto-scaling group
+    Type: Number
+    Default: 1
+  MaxSize:
+    Description: Max. number of EC2 instances in auto-scaling group
+    Type: Number
+    Default: 1
+  DesiredSize:
+    Description: Ideal number of EC2 instances in auto-scaling group
+    Type: Number
+    Default: 1
+  ImageId:
+    Description: EC2 AMI ID used in auto-scaling group
+    Type: AWS::EC2::Image::Id
+    Default: ami-0ebc281c20e89ba4b    
+  BucketName:
+    Description: Storage bucket name
+    Type: String
+    Default: testia-lz-s3
+  DBInstanceClass:
+    Description: Database instance type
+    Type: String
+    Default: db.t2.micro    
+  DBName:
+    Description: Database name
+    Type: String
+    Default: testiaDB
+  DBUsername:
+    Description: Database username
+    Type: String
+    Default: testiaDBUser
+  DBPassword:
+    Description: Database password
+    Type: String
+  DBAllocatedStorage:
+    Description: Allocated storage on RDS instance
+    Type: Number
+    Default: 20
+  SSLCertificateArn:
+    Description: SSL Certificate ARN required to enable HTTPS connection to ELB
+    Type: String
+
+# Use this conditional to tighten resources in QA environement
+Conditions:
+  QANotify:
+    Fn::Equals:
+      - !Ref EnvironmentValue
+      - qa
+
+
+Resources:
+
+  ###################
+  # NETWORK RESOURCES
+  ###################
+
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      InstanceTenancy: default
+      Tags:
+        - Key: environment
+          Value: !Ref EnvironmentValue
+        - Key: projectName
+          Value: !Ref ProjectName
+
+  PubSubnetZoneA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone:
+          Fn::Select:
+          - 0
+          - Fn::GetAZs:
+              Ref: AWS::Region
+      CidrBlock: 10.0.10.0/24
+      MapPublicIpOnLaunch: true
+      VpcId:
+        Ref: VPC
+      Tags:
+        - Key: environment
+          Value: !Ref EnvironmentValue
+        - Key: projectName
+          Value: !Ref ProjectName
+
+  PubSubnetZoneB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone:
+          Fn::Select:
+          - 1
+          - Fn::GetAZs:
+              Ref: AWS::Region
+      CidrBlock: 10.0.30.0/24
+      MapPublicIpOnLaunch: true
+      VpcId: !Ref VPC
+      Tags:
+        - Key: environment
+          Value: !Ref EnvironmentValue
+        - Key: projectName
+          Value: !Ref ProjectName
+
+  PrivSubnetZoneA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone:
+          Fn::Select:
+          - 0
+          - Fn::GetAZs:
+              Ref: AWS::Region
+      CidrBlock: 10.0.20.0/24
+      MapPublicIpOnLaunch: False
+      VpcId: !Ref VPC
+      Tags:
+        - Key: environment
+          Value: !Ref EnvironmentValue
+        - Key: projectName
+          Value: !Ref ProjectName
+
+  PrivSubnetZoneB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone:
+          Fn::Select:
+          - 1
+          - Fn::GetAZs:
+              Ref: AWS::Region
+      CidrBlock: 10.0.40.0/24
+      MapPublicIpOnLaunch: False
+      VpcId: !Ref VPC
+      Tags:
+        - Key: environment
+          Value: !Ref EnvironmentValue
+        - Key: projectName
+          Value: !Ref ProjectName
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: environment
+          Value: !Ref EnvironmentValue
+        - Key: projectName
+          Value: !Ref ProjectName
+
+  GatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId:
+          Ref: InternetGateway
+      VpcId:
+          Ref: VPC
+
+
+  ### Route traffic through the internet gateway, for the public subnet in each AZ ###
+  RouteTablePubZoneA:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: environment
+          Value: !Ref EnvironmentValue
+        - Key: projectName
+          Value: !Ref ProjectName
+
+  RouteTablePubZoneB:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: environment
+          Value: !Ref EnvironmentValue
+        - Key: projectName
+          Value: !Ref ProjectName
+
+  RoutePubZoneA:
+    Type: AWS::EC2::Route
+    DependsOn:
+      - InternetGateway
+    Properties:
+        DestinationCidrBlock: 0.0.0.0/0
+        GatewayId: !Ref InternetGateway
+        RouteTableId: !Ref RouteTablePubZoneA
+
+  RoutePubZoneB:
+    DependsOn:
+        - InternetGateway
+    Type: AWS::EC2::Route
+    Properties:
+        DestinationCidrBlock: 0.0.0.0/0
+        GatewayId: !Ref InternetGateway
+        RouteTableId: !Ref RouteTablePubZoneB
+
+  # Associate each public subnet to its routing table
+  RouteAssociationPubSubnetZoneA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+        SubnetId: !Ref PubSubnetZoneA
+        RouteTableId: !Ref RouteTablePubZoneA
+
+  RouteAssociationPubSubnetZoneB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+        SubnetId: !Ref PubSubnetZoneB
+        RouteTableId: !Ref RouteTablePubZoneB
+
+  # Routing table for the private subnet in AZ
+  RouteTablePrivZoneA:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  RouteTablePrivZoneB:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  # Associate each private subnet with its routing table
+  RouteAssociationPrivSubnetZoneA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivSubnetZoneA
+      RouteTableId: !Ref RouteTablePrivZoneA
+
+  RouteAssociationPrivSubnetZoneB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivSubnetZoneB
+      RouteTableId: !Ref RouteTablePrivZoneB
+
+
+  ### Allow port 80 traffic from ALB to EC2 ###
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SSH and HTTP
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+          - IpProtocol: tcp
+            FromPort: 80
+            ToPort: 80
+            SourceSecurityGroupId: !Ref ALBSecurityGroup
+
+  # ALB Security Group allowing Port 80 connections from anywhere
+  # TODO: to be restricted to client's IP scope
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP connection to ALB
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+          - IpProtocol: tcp
+            FromPort: 80
+            ToPort: 80
+            CidrIp: 0.0.0.0/0
+
+  # RDS DB Security Group allowing incoming connections from EC2 through port 5432
+  DBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow connection from EC2 to RDS DB
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 5432
+        ToPort: 5432
+        SourceSecurityGroupId: !Ref EC2SecurityGroup
+
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Private subnets used to host the database layer
+      SubnetIds:
+        - !Ref PrivSubnetZoneA
+        - !Ref PrivSubnetZoneB
+
+
+
+  ############################
+  # AUTO-SCALING CONFIGURATION
+  ############################
+
+  EC2LaunchConfiguration:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId: !Ref ImageId
+      InstanceType: !Ref EC2InstanceType
+      KeyName: !Ref SSHKeyName
+      SecurityGroups:
+        - !Ref EC2SecurityGroup
+      UserData:
+        Fn::Base64:
+          !Sub |
+              #!/bin/bash -ex
+              # install python & django & apache & wsgi              
+              sudo apt-get update && apt-get upgrade
+              sudo apt-get install nginx python-pip python-dev build-essential python-virtualenv
+              mkdir -p /var/www/testia-lz && cd /var/www/testia-lz
+              virtualenv --python=python3 --always-copy venv
+              pip install django gunicorn              
+              # retrieve code from Gitlab CI
+              # serve on port 80
+
+
+
+
+  # Auto-scaling group
+  AutoScalingGroupInstance:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+        - !Ref PubSubnetZoneA
+        - !Ref PubSubnetZoneB
+      LaunchConfigurationName: !Ref EC2LaunchConfiguration
+      MinSize: !Ref MinSize
+      MaxSize: !Ref MaxSize
+      MetricsCollection:
+        -
+          Granularity: 1Minute
+          Metrics:
+            - GroupMinSize
+            - GroupMaxSize
+      TargetGroupARNs:
+        - !Ref EC2TargetGroup
+      Tags:
+        - Key: environment
+          Value: !Ref EnvironmentValue
+        - Key: projectName
+          Value: !Ref ProjectName
+
+  # EC2 Target Group for load balancing
+  EC2TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 30
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 15
+      HealthyThresholdCount: 5
+      Matcher:
+        HttpCode: 200
+      Name: EC2TargetGroup
+      Port: 80
+      Protocol: HTTP
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 20
+      UnhealthyThresholdCount: 3
+      VpcId: !Ref VPC
+      Tags:
+        - Key: environment
+          Value: !Ref EnvironmentValue
+        - Key: projectName
+          Value: !Ref ProjectName
+
+
+  ###############
+  # LOAD BALANCER
+  ###############
+
+  # Application Load Balancer Instance
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      IpAddressType: ipv4
+      Scheme: internet-facing
+      Type: application
+      Subnets:
+        - !Ref PubSubnetZoneA
+        - !Ref PubSubnetZoneB
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Tags:
+        - Key: environment
+          Value: !Ref EnvironmentValue
+        - Key: projectName
+          Value: !Ref ProjectName
+
+  # Application Load Balancer listener (with HTTPS redirect and forward to EC2 target group)
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref EC2TargetGroup
+        - Type: redirect
+          RedirectConfig:
+            Host: '#{host}'
+            Path: '/#{path}'
+            Port: 443
+            Protocol: HTTPS
+            Query: '#{query}'
+            StatusCode: HTTP_301
+      # Certificates:
+      #   - Ref: SSLCertificateArn
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      
+      
+  ###################
+  # BLOB STORAGE TIER
+  ###################
+  
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Ref BucketName
+      
+      
+      
+  ###################
+  # ACCESS MANAGEMENT
+  ###################  
+  
+  RootInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles:
+        - !Ref S3WritableRole
+      
+  S3WritableRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      
+  RolePolicies:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: EC2S3AccessPolicy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action: 's3:*'
+            Resource: !Ref S3Bucket
+      Roles:
+        - !Ref S3WritableRole
+
+
+  ################
+  # DATABASE LAYER
+  ################
+
+  RDSDBInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBName: !Ref DBName
+      AllocatedStorage: !Ref DBAllocatedStorage
+      DBInstanceClass : !Ref DBInstanceClass
+      Engine : postgres
+      MasterUsername : !Ref DBUsername
+      MasterUserPassword : !Ref DBPassword
+      VPCSecurityGroups:
+        - !Ref DBSecurityGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      Tags:
+        - Key: environment
+          Value: !Ref EnvironmentValue
+        - Key: projectName
+          Value: !Ref ProjectName
+
+
+
+
+Outputs:
+  ALBHostName:
+      Description: Application Load Balancer Hostname
+      Value: !GetAtt ApplicationLoadBalancer.DNSName
+      Export:
+        Name: !Sub ${AWS::StackName}-ALBEndpoint
+  S3Bucket:
+      Description: The name of the S3 bucket
+      Value: !Ref S3Bucket
+      Export:
+        Name: !Sub ${AWS::StackName}-S3
+  RDSInstance:
+      Description: The name of the database instance.
+      Value: !Ref RDSDBInstance
+      Export:
+        Name: !Sub ${AWS::StackName}-RDS
+  RDSDNSName:
+      Description: The connection endpoint for the database.
+      Value: !GetAtt RDSDBInstance.Endpoint.Address
+      Export:
+        Name: !Sub ${AWS::StackName}-RDS-DNSName
