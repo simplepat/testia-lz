@@ -60,8 +60,10 @@ Parameters:
     Type: Number
     Default: 20
   SSLCertificateArn:
-    Description: SSL Certificate ARN required to enable HTTPS connection to ELB
+    Description: SSL Certificate ARN
     Type: String
+    Default: arn:aws:acm:eu-west-3:898416605131:certificate/d6c956e5-2d02-42cc-9469-3a2691a5f8c9
+
 
 # Use this conditional to tighten resources in QA environement
 Conditions:
@@ -254,19 +256,19 @@ Resources:
       RouteTableId: !Ref RouteTablePrivZoneB
 
 
-  ### Allow port 80 traffic from ALB to EC2 ###
+  ### Allow port 80 (decrypted) traffic from ALB to EC2 ###
   EC2SecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: HTTPS
+      GroupDescription: Security group to restrict access to EC2 instances in public subnets
       VpcId: !Ref VPC
       SecurityGroupIngress:
           - IpProtocol: tcp
-            FromPort: 443
-            ToPort: 443
+            FromPort: 80
+            ToPort: 80
             SourceSecurityGroupId: !Ref ALBSecurityGroup
 
-  # ALB Security Group allowing Port 80 connections from anywhere
+  # ALB Security Group allowing port 443 connections from anywhere
   # TODO: to be restricted to client's IP scope
   ALBSecurityGroup:
     Type: AWS::EC2::SecurityGroup
@@ -317,12 +319,24 @@ Resources:
         Fn::Base64:
           !Sub |
               #!/bin/bash -ex
-              # install python & django & apache & wsgi              
-              sudo apt-get update && apt-get upgrade
-              sudo apt-get install nginx python-pip python-dev build-essential python-virtualenv
-              mkdir -p /var/www/testia-lz && cd /var/www/testia-lz
-              virtualenv --python=python3 --always-copy venv
-              pip install django gunicorn              
+              sudo yum update -y
+              # install compiling stuff
+              sudo yum install -y gcc openssl-devel bzip2-devel libffi-devel postgresql
+              # install python
+              cd /opt
+              sudo wget https://www.python.org/ftp/python/3.7.4/Python-3.7.4.tgz && sudo tar xzf Python-3.7.4.tgz
+              cd Python-3.7.4
+              sudo ./configure --enable-optimizations
+              sudo make altinstall
+              sudo rm /opt/Python-3.7.4.tgz
+              sudo ln -sf /usr/local/bin/python3.7 /usr/bin/python
+              sudo ln -sf /usr/local/bin/pip /usr/bin/pip
+              sudo pip install --upgrade pip
+              sudo yum install -y nginx && sudo service nginx start        
+              # install django              
+              pip install django gunicorn virtualenv  
+              sudo mkdir -p /var/www/testia-lz && cd /var/www/testia-lz
+              # TO TEST CONNECTION: psql --host=<host>.eu-west-3.rds.amazonaws.com --username=testiaDBUser --password=<mypwd> --dbname testiaDB
               # retrieve code from Gitlab CI
               # serve on port 80
 
@@ -366,8 +380,8 @@ Resources:
       Matcher:
         HttpCode: 200
       Name: EC2TargetGroup
-      Port: 443
-      Protocol: HTTPS
+      Port: 80
+      Protocol: HTTP
       TargetGroupAttributes:
         - Key: deregistration_delay.timeout_seconds
           Value: 20
@@ -378,7 +392,7 @@ Resources:
           Value: !Ref EnvironmentValue
         - Key: projectName
           Value: !Ref ProjectName
-
+             
 
   ###############
   # LOAD BALANCER
@@ -409,19 +423,12 @@ Resources:
       DefaultActions:
         - Type: forward
           TargetGroupArn: !Ref EC2TargetGroup
-        # - Type: redirect
-          # RedirectConfig:
-            # Host: '#{host}'
-            # Path: '/#{path}'
-            # Port: 443
-            # Protocol: HTTPS
-            # Query: '#{query}'
-            # StatusCode: HTTP_301
-      # Certificates:
-      #   - Ref: SSLCertificateArn
+      Certificates:
+        - CertificateArn: !Ref SSLCertificateArn
       LoadBalancerArn: !Ref ApplicationLoadBalancer
       Port: 443
       Protocol: HTTPS
+      
       
       
   ###################
@@ -484,6 +491,7 @@ Resources:
       AllocatedStorage: !Ref DBAllocatedStorage
       DBInstanceClass : !Ref DBInstanceClass
       Engine : postgres
+      DeletionProtection: !If [QANotify, false, true]
       MasterUsername : !Ref DBUsername
       MasterUserPassword : !Ref DBPassword
       VPCSecurityGroups:
